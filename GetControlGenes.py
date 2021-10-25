@@ -1,8 +1,10 @@
 from Bio import SeqIO
 from time import sleep
 from Bio import AlignIO, Align
+from Bio.Align.AlignInfo import PSSM, SummaryInfo
 from io import StringIO
 from Bio import Entrez
+from tqdm import tqdm
 
 # Unix systems ONLY
 from sh import mafft
@@ -23,6 +25,7 @@ class FeatureFinder(object):
     def get_features(self, gbff_file_path, drop_duplicates=True):
         """Primary function to feed the gbff file path to."""
         rna_df = self.get_gbff_features(gbff_file_path, drop_duplicates=drop_duplicates)
+        rna_df = self.get_df_lengths(rna_df)
         self.rna_df = rna_df
         return rna_df
 
@@ -62,6 +65,14 @@ class FeatureFinder(object):
 
         cds_data = [cds, locus, cds_loc, cds_start, cds_end, orientation, cds_seq]
         return cds_data
+    
+    def get_df_lengths(self, rna_df):
+        rna_df['length'] = rna_df.End - rna_df.Start
+        rna_df['aa_length'] = rna_df.length / 3
+        rna_df2 = rna_df[(rna_df.Gene.str.contains('ypothetical') == False) & (rna_df.Gene != 'gene')]
+        rna_df2 = rna_df2.sort_values(by='aa_length')
+
+        return rna_df2
 
     def get_gbff_features(self, gbff_handle, drop_duplicates=True):
 
@@ -114,25 +125,13 @@ class EntrezWrapper(object):
         print(message)
         return search_results, s_count
 
-    def get_nucleotide_fasta(self, query, outfile, q_type='genome', db='nucleotide', write=True, retmax=5000, limit=20):
+    def get_nucleotide_fasta(self, mquery, outfile, db='nucleotide', write=True, retmax=300, limit=300):
             """"
             Input:
             query: str, ncbi nucleotide search term, should be pathogen
             outfile: str, path to output fasta file
-            q_type: str, [genome, plasmid, custom]
             write: bool, write output to file path otherwise return as string.
             """
-
-            if q_type == 'genome':
-                query = query.replace('_', ' ')
-                mquery = f'{query} complete genome AND {query}[Organism]'
-            elif q_type == 'plasmid':
-                query = query.replace('_', ' ')
-                mquery = f'{query}[Title] AND plasmid[filter] AND {query}[Organism]'
-            elif q_type == 'custom':
-                mquery = query
-            else:
-                mquery = f'{query}[Title]'
 
             search_results, s_count = self.get_search_dict(db, mquery)
 
@@ -142,7 +141,7 @@ class EntrezWrapper(object):
                 raise ValueError(message)
 
             master_fetch = ''
-            for start in range(0, s_count, retmax):
+            for start in tqdm(range(0, limit, retmax)):
                 if start >= limit:
                     break
                 fetch_handle = self.entrez.efetch(db=db, rettype="fasta", retmode="text", retstart=start, retmax=retmax,
@@ -156,14 +155,14 @@ class EntrezWrapper(object):
                 return master_fetch
             
 class PullQCGenes(object):
-    def __init__(self, email='None@gmail.com'):
+    def __init__(self, email='None@gmail.com', ncbi_api_key=None):
         self.df_list = []
         self.rec_count = 0
-        self.ee = EntrezWrapper(email)#, ncbi_api_key='5ad23cdce078ec9c214e1cc886fd2f8a7409')
+        self.ee = EntrezWrapper(email, ncbi_api_key=ncbi_api_key)
         self.completed_genes = {}
 
     @staticmethod
-    def remove_seq_duplicates(fastas, format='fasta'):
+    def remove_seq_duplicates(fastas, seq_len, format='fasta'):
         fasta_array = [rec for rec in SeqIO.parse(StringIO(fastas), 'fasta') if len(rec) < seq_len * 1.5]
         fasta_df = pd.DataFrame([([rec.description, rec.seq.__str__()]) for rec in fasta_array], columns=['description', 'seq'])
         fasta_df.drop_duplicates(subset='seq', inplace=True)
@@ -173,11 +172,19 @@ class PullQCGenes(object):
         else:
             return fasta_df
         
-    def pull_and_qc_genes(self, rna_df2, top=40):
+    def plot_pssm(self, df_pssm, protein_name):
+        plt.figure(figsize=(30,4),dpi=300)
+        sns.heatmap(df_pssm)
+        plt.ylabel('AA at position')
+        plt.xlabel('Position in alignment')
+        plt.title(protein_name)
+        plt.show()
+        
+    def pull_and_qc_genes(self, rna_df2, organism, retmax=300, limit=300):
         ee = self.ee
         df_list = self.df_list
     
-        for row in rna_df2.head(top).itertuples():
+        for row in rna_df2.itertuples():
             protein_name = row[1]
             seq_len = row[-1]
             if protein_name in self.completed_genes:
@@ -185,16 +192,17 @@ class PullQCGenes(object):
             else:
                 self.completed_genes[protein_name] = None
             try:
-                fastas = ee.get_nucleotide_fasta(f'{protein_name} AND Streptococcaceae[Organism]', None, db='protein', 
-                                                 q_type='custom', write=False, retmax=100, limit=100)
+                fastas = ee.get_nucleotide_fasta(f'{protein_name} AND {organism}[Organism]', 'temp_seq.fasta', db='protein', 
+                                                write=False, retmax=retmax, limit=limit)
             except Exception as e:
+                print("Exception", e)
                 continue
 
             # cut down on length
-            fasta_array = [rec for rec in SeqIO.parse(StringIO(fastas), 'fasta') if len(rec) < seq_len * 1.5]
+            fasta_array = [rec for rec in SeqIO.parse(StringIO(fastas), 'fasta') if len(rec) < seq_len * 1.5 and len(rec) > seq_len *0.5]
             fastas = "\n".join([">" + "\n".join([rec.description, rec.seq.__str__()]) for rec in fasta_array])
 
-            fastas = remove_seq_duplicates(fastas)
+            fastas = self.remove_seq_duplicates(fastas, seq_len)
 
             filepath = 'test.fasta'
             open(filepath, 'w').write(fastas)
@@ -206,7 +214,7 @@ class PullQCGenes(object):
             bufout.seek(0)
 
             aln = bufout.read()
-            aln_df = remove_seq_duplicates(aln, format='df')
+            aln_df = self.remove_seq_duplicates(aln, seq_len, format='df')
             aln_df['gene'] = protein_name
             bufout.seek(0)
             try:
@@ -215,21 +223,21 @@ class PullQCGenes(object):
                 print(e)
                 continue
             pssm = (SummaryInfo(alnio).pos_specific_score_matrix().pssm)
-
-            plt.figure(figsize=(30,4),dpi=300)
             pssm2 = {k+str(ind):v for ind, (k,v) in enumerate(pssm)}
             df_pssm = pd.DataFrame(pssm2)
 
-            sns.heatmap(df_pssm)
-            plt.ylabel('AA at position')
-            plt.xlabel('Position in alignment')
-            plt.title(protein_name)
-            plt.show()
+            self.plot_pssm(df_pssm, protein_name)
             row_len, col_len = df_pssm.shape
 
             if col_len < seq_len * 2 and row_len > 4:
                 self.rec_count += row_len
                 df_list.append(aln_df)
+            else:
+                print(f'{protein_name} retrieved information insufficient')
 
             print("Total rec count: ", self.rec_count)
+            
+        df = pd.concat(df_list)
+        
+        return df
  
