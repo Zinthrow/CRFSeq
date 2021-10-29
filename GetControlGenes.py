@@ -14,6 +14,7 @@ import os
 import matplotlib.pyplot as plt
 import seaborn as sns
 import logging 
+import time
 
 logger = logging.getLogger()
 
@@ -114,8 +115,8 @@ class EntrezWrapper(object):
         self.entrez.email = email
         if ncbi_api_key is not None:
             self.entrez.api_key = ncbi_api_key
-        self.entrez.max_tries = 10
-        self.entrez.sleep_between_tries = 10
+        self.entrez.max_tries = 3
+        self.entrez.sleep_between_tries = 3
 
     def get_search_dict(self, database, mquery, sort='significance'):
         handle = self.entrez.esearch(database, term=mquery, usehistory="y", sort=sort)
@@ -125,7 +126,7 @@ class EntrezWrapper(object):
         print(message)
         return search_results, s_count
 
-    def get_nucleotide_fasta(self, mquery, outfile, db='nucleotide', write=True, retmax=300, limit=300):
+    def get_nucleotide_fasta(self, mquery, outfile, db='nucleotide', write=False, retmax=300, limit=300):
             """"
             Input:
             query: str, ncbi nucleotide search term, should be pathogen
@@ -134,6 +135,7 @@ class EntrezWrapper(object):
             """
 
             search_results, s_count = self.get_search_dict(db, mquery)
+            time.sleep(1)
 
             if s_count == 0:
                 message = f'Query invalid: {query}'
@@ -141,11 +143,13 @@ class EntrezWrapper(object):
                 raise ValueError(message)
 
             master_fetch = ''
-            for start in tqdm(range(0, limit, retmax)):
+            for start in range(0, limit, retmax):
+                print(start, 'quer_lim', retmax, limit)
                 if start >= limit:
                     break
                 fetch_handle = self.entrez.efetch(db=db, rettype="fasta", retmode="text", retstart=start, retmax=retmax,
                                                   webenv=search_results['WebEnv'], query_key=search_results['QueryKey'])
+                time.sleep(1)
                 master_fetch += fetch_handle.read()
                 master_fetch += '\n'
             if write is True:
@@ -192,7 +196,7 @@ class PullQCGenes(object):
             else:
                 self.completed_genes[protein_name] = None
             try:
-                fastas = ee.get_nucleotide_fasta(f'{protein_name} AND {organism}[Organism]', 'temp_seq.fasta', db='protein', 
+                fastas = ee.get_nucleotide_fasta(f'{protein_name} AND {organism}[Organism]', f'{protein_name}_seq.fasta', db='protein', 
                                                 write=False, retmax=retmax, limit=limit)
             except Exception as e:
                 print("Exception", e)
@@ -204,7 +208,7 @@ class PullQCGenes(object):
 
             fastas = self.remove_seq_duplicates(fastas, seq_len)
 
-            filepath = 'test.fasta'
+            filepath = f'{protein_name}.fasta'
             open(filepath, 'w').write(fastas)
             buf = StringIO(fastas)
             bufout = StringIO()
